@@ -1,0 +1,26 @@
+# K10 Location Profile for MinIO S3-compatible storage
+# IMPORTANT: Replace <HOST_IP> with your actual host IP before applying
+# Find your IP with: hostname -I | awk '{print $1}'
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Profile
+metadata:
+  name: minio-export
+  namespace: kasten-io
+spec:
+  type: Location
+  locationSpec:
+    credential:
+      secretType: AwsAccessKey
+      secret:
+        apiVersion: v1
+        kind: Secret
+        name: k10-minio-secret
+        namespace: kasten-io
+    type: ObjectStore
+    objectStore:
+      name: k10-exports
+      objectStoreType: S3
+      region: us-east-1
+      endpoint: http://<HOST_IP>:9000
+      skipSSLVerify: true
+      pathType: Path

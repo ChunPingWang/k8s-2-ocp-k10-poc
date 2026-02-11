@@ -1,0 +1,32 @@
+# K10 Backup Policy for demo-app namespace
+# This policy performs backup + export to the MinIO location profile
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: demo-app-backup
+  namespace: kasten-io
+spec:
+  comment: "PoC backup policy for demo-app"
+  frequency: "@onDemand"
+  actions:
+    - action: backup
+      backupParameters:
+        filters:
+          includeClusterResources: []
+        profile:
+          name: minio-export
+          namespace: kasten-io
+    - action: export
+      exportParameters:
+        frequency: "@onDemand"
+        profile:
+          name: minio-export
+          namespace: kasten-io
+        exportData:
+          enabled: true
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - demo-app
