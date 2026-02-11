@@ -160,7 +160,7 @@ bash phase6-validation/validate-restore.sh
 ## 已知限制
 
 - **CRC 資源壓力**：K10 在 `kasten-io` 命名空間執行 10+ Pod，CRC 建議分配 ≥14 GB RAM
-- **Kind CSI 快照**：Kind 預設 provisioner 不支援 CSI 快照，K10 會回退至檔案複製（通用備份）
+- **Kind CSI 快照**：Kind 的 `hostpath.csi.k8s.io` 驅動程式未被 K10 識別為支援的 CSI 驅動程式。通用儲存備份（GSB）自 K10 v6.5.0 起需要付費啟用金鑰（[詳情](https://docs.kasten.io/latest/install/gvs_restricted/)）。PoC 使用 emptyDir 替代 PVC 來展示 K10 資源備份工作流。生產環境請使用 K10 支援的 CSI 驅動程式（AWS EBS、Ceph RBD 等）
 - **映像檔可用性**：本機建置的映像檔若未推送至共享 Registry，在 CRC 上會出現 `ImagePullBackOff`
 - **OpenShift SCC**：還原的工作負載 Pod 可能仍需手動授予 SCC
 - **免費版限制**：免費版限制 5 節點，企業功能（多叢集儀表板、RBAC、勒索軟體防護）需付費授權
