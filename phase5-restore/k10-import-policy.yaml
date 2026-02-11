@@ -1,0 +1,24 @@
+# K10 Import Policy for demo-app namespace on OpenShift
+# Apply this on the target (OpenShift) cluster after backup export completes
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: demo-app-import
+  namespace: kasten-io
+spec:
+  comment: "PoC import policy for demo-app recovery"
+  frequency: "@onDemand"
+  actions:
+    - action: import
+      importParameters:
+        profile:
+          name: minio-export
+          namespace: kasten-io
+        importData:
+          enabled: true
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - demo-app
