@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "=== Triggering K10 backup policy for demo-app ==="
 
-cat <<EOF | kubectl apply -f -
+cat <<EOF | kubectl create -f -
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RunAction
 metadata:

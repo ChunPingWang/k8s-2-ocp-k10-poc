@@ -18,21 +18,10 @@ type: Opaque
 stringData:
   DB_PASSWORD: "poc-secret-123"
 ---
-# PVC
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-data
-  namespace: demo-app
-  labels:
-    app: postgres
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
----
 # PostgreSQL Deployment
+# NOTE: Using emptyDir instead of PVC because K10 free tier does not
+# recognize the hostpath CSI driver for volume snapshots on Kind.
+# In production, use a supported CSI driver (AWS EBS, Ceph RBD, etc.)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,12 +45,14 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef: { name: app-secret, key: DB_PASSWORD }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data
       volumes:
         - name: pgdata
-          persistentVolumeClaim: { claimName: postgres-data }
+          emptyDir: {}
 ---
 # PostgreSQL Service
 apiVersion: v1

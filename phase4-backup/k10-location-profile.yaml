@@ -21,6 +21,5 @@ spec:
       name: k10-exports
       objectStoreType: S3
       region: us-east-1
-      endpoint: http://<HOST_IP>:9000
+      endpoint: http://10.0.0.11:9000
       skipSSLVerify: true
-      pathType: Path
