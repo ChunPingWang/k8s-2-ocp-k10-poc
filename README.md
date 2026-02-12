@@ -4,6 +4,217 @@
 
 本專案示範如何使用 **Veeam Kasten K10** 作為資料管理平台，將運行於 **Kind**（Kubernetes-in-Docker）叢集上的工作負載備份，並還原至 **Red Hat OpenShift Local**（CRC）叢集。透過 **MinIO** S3 相容物件儲存作為跨叢集的匯出/匯入目標。
 
+## Kubernetes 備份與還原核心概念
+
+### 為什麼 Kubernetes 需要備份？
+
+傳統虛擬機器備份僅需對磁碟做快照，但 Kubernetes 的工作負載由多種相互關聯的資源組成，備份挑戰截然不同：
+
+| 層級 | 資源範例 | 說明 |
+|---|---|---|
+| **叢集層級** | Node、ClusterRole、StorageClass、CRD | 定義叢集基礎架構與全域策略 |
+| **命名空間層級** | Deployment、Service、ConfigMap、Secret | 應用程式的宣告式配置（「期望狀態」） |
+| **資料層級** | PersistentVolume (PV)、PersistentVolumeClaim (PVC) | 實際的持久化資料（資料庫檔案、上傳檔案等） |
+
+僅備份 YAML 清單不夠（資料會遺失）；僅備份磁碟也不夠（無法重建 Pod 網路與服務發現）。**完整的 Kubernetes 備份必須同時涵蓋資源定義與持久化資料。**
+
+### Kubernetes 備份的關鍵元件
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Kubernetes 叢集                        │
+│                                                          │
+│  ┌──────────────┐   ┌──────────────┐   ┌─────────────┐  │
+│  │  etcd         │   │  API Server   │   │  kubelet    │  │
+│  │  (叢集狀態)   │   │  (資源 CRUD)  │   │  (Pod 管理) │  │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬──────┘  │
+│         │                  │                   │         │
+│         ▼                  ▼                   ▼         │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │  Namespace: demo-app                                │ │
+│  │  ┌───────────┐ ┌─────────┐ ┌────────┐ ┌─────────┐  │ │
+│  │  │Deployment │ │ Service │ │ConfigMap│ │ Secret  │  │ │
+│  │  └─────┬─────┘ └─────────┘ └────────┘ └─────────┘  │ │
+│  │        │                                            │ │
+│  │        ▼                                            │ │
+│  │  ┌───────────┐      ┌──────────────────┐            │ │
+│  │  │   Pod     │─────▶│ PVC ──▶ PV (資料) │            │ │
+│  │  └───────────┘      └──────────────────┘            │ │
+│  └─────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **etcd**：Kubernetes 的分散式鍵值儲存，保存所有叢集狀態。直接備份 etcd 可實現叢集級災難復原，但粒度太粗、難以做應用程式級還原
+- **API Server**：所有備份工具都透過 Kubernetes API 讀取資源清單（Deployment、Service 等）
+- **CSI（Container Storage Interface）**：標準化的儲存介面，讓備份工具能建立 **VolumeSnapshot**（磁碟快照），實現一致性資料備份
+- **PV / PVC**：PersistentVolume 是實際儲存；PersistentVolumeClaim 是 Pod 對儲存的請求。備份時需對 PV 做快照以保留資料
+
+### VolumeSnapshot 機制
+
+CSI VolumeSnapshot 是 Kubernetes 原生的磁碟快照 API，是現代備份工具的基礎：
+
+```
+Pod 寫入資料 ──▶ PVC ──▶ PV (CSI Driver)
+                              │
+                    VolumeSnapshot API
+                              │
+                              ▼
+                      VolumeSnapshotContent
+                       (磁碟快照副本)
+```
+
+三個關鍵 CRD：
+- **VolumeSnapshotClass**：定義快照的驅動程式與參數（類似 StorageClass）
+- **VolumeSnapshot**：使用者請求建立快照
+- **VolumeSnapshotContent**：實際的快照資料（由 CSI 驅動程式管理）
+
+### 跨叢集遷移的挑戰
+
+將工作負載從叢集 A 還原至叢集 B 面臨以下挑戰：
+
+1. **儲存差異**：來源叢集用 AWS EBS，目標叢集用 Ceph RBD — StorageClass 名稱與驅動程式不同
+2. **網路差異**：ClusterIP、NodePort 範圍可能不同，Ingress 配置需調整
+3. **安全性差異**：OpenShift 的 SCC 比標準 K8s 的 PodSecurityPolicy/Standards 更嚴格
+4. **映像檔可用性**：私有 Registry 中的映像檔在目標叢集可能無法拉取
+5. **CRD 相容性**：自訂資源定義在目標叢集上必須先安裝
+
+## Kasten K10 深入介紹
+
+### K10 架構
+
+K10 以 Helm Chart 部署於 `kasten-io` 命名空間，包含以下核心元件：
+
+```
+┌─────────────────────────────────────────────────┐
+│  kasten-io 命名空間                               │
+│                                                  │
+│  ┌────────────┐  ┌──────────────┐  ┌──────────┐ │
+│  │ Gateway    │  │ Dashboard/   │  │ Auth     │ │
+│  │ (入口)     │  │ Frontend     │  │ Service  │ │
+│  └──────┬─────┘  └──────────────┘  └──────────┘ │
+│         │                                        │
+│  ┌──────▼─────┐  ┌──────────────┐  ┌──────────┐ │
+│  │ Controller │  │ Catalog      │  │ Crypto   │ │
+│  │ Manager    │  │ Service      │  │ Service  │ │
+│  │ (策略引擎) │  │ (還原點目錄) │  │ (加密)   │ │
+│  └──────┬─────┘  └──────────────┘  └──────────┘ │
+│         │                                        │
+│  ┌──────▼─────┐  ┌──────────────┐  ┌──────────┐ │
+│  │ Executor   │  │ Kanister     │  │ State    │ │
+│  │ (執行備份/ │  │ Service      │  │ Service  │ │
+│  │  還原動作) │  │ (應用感知)   │  │ (狀態DB) │ │
+│  └────────────┘  └──────────────┘  └──────────┘ │
+└─────────────────────────────────────────────────┘
+```
+
+### K10 核心概念
+
+#### Profile（位置設定檔）
+
+Profile 定義備份資料的儲存目標，支援多種後端：
+
+- **S3 相容儲存**：AWS S3、MinIO、Ceph Object Gateway
+- **Azure Blob Storage**
+- **Google Cloud Storage**
+- **NFS**
+
+```yaml
+# 範例：MinIO S3 Profile
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Profile
+spec:
+  type: Location
+  locationSpec:
+    type: ObjectStore
+    objectStore:
+      objectStoreType: S3
+      endpoint: http://minio:9000   # S3 端點
+      name: k10-exports             # Bucket 名稱
+```
+
+#### Policy（策略）
+
+Policy 定義「何時」與「如何」執行備份，是 K10 的核心抽象：
+
+- **backup**：備份 Kubernetes 資源清單 + PV 快照
+- **export**：將備份資料匯出至外部儲存（跨叢集遷移必須）
+- **import**：從外部儲存匯入備份（目標叢集側）
+
+```
+Policy 工作流：
+  backup ──▶ 本地還原點（RestorePoint）
+               │
+           export ──▶ 外部儲存（S3 Bucket）
+                           │
+                       import ──▶ RestorePointContent（目標叢集）
+                                       │
+                                   restore ──▶ 還原工作負載
+```
+
+#### RestorePoint（還原點）
+
+K10 的還原點包含：
+- **資源清單**：所有 Kubernetes 資源的 JSON/YAML 序列化
+- **PV 快照參考**：指向 CSI VolumeSnapshotContent 的參照
+- **元資料**：時間戳、來源叢集資訊、備份策略
+
+跨叢集匯入時，K10 先建立 **RestorePointContent**（叢集層級），再綁定至 **RestorePoint**（命名空間層級），最後透過 **RestoreAction** 執行還原。
+
+#### Kanister（應用程式感知框架）
+
+Kanister 是 K10 的應用程式感知引擎，透過 **Blueprint** 定義資料庫的一致性備份流程：
+
+| 資料庫 | Blueprint 操作 |
+|---|---|
+| PostgreSQL | `pg_dump` / `pg_restore` |
+| MySQL | `mysqldump` / `mysql` |
+| MongoDB | `mongodump` / `mongorestore` |
+| Elasticsearch | Snapshot API |
+
+K10 自動注入 **kanister-sidecar** 容器至被備份的 Pod，用於在 Pod 內執行資料一致性操作。
+
+### K10 備份與還原流程
+
+#### 來源叢集（備份 + 匯出）
+
+```
+1. 建立 Policy（指定備份目標命名空間）
+2. Policy 觸發 BackupAction
+   ├── 掃描命名空間中的所有資源（Deployment、Service、ConfigMap...）
+   ├── 序列化資源至 Kopia 儲存庫
+   └── 建立 PV 的 VolumeSnapshot（如有 PVC）
+3. Policy 觸發 ExportAction
+   ├── 將本地備份資料上傳至 S3
+   └── 產生 receiveString（加密的匯入金鑰）
+```
+
+#### 目標叢集（匯入 + 還原）
+
+```
+1. 建立 Profile（指向相同的 S3 儲存）
+2. 建立 Import Policy（使用來源叢集的 receiveString）
+3. 觸發 ImportAction
+   ├── 從 S3 讀取匯出資料
+   └── 建立 RestorePointContent
+4. 建立 RestorePoint 綁定至 RestorePointContent
+5. 觸發 RestoreAction
+   ├── 反序列化 Kubernetes 資源
+   ├── 建立 Deployment、Service、ConfigMap、Secret 等
+   └── 還原 PV 資料（如有）
+```
+
+### K10 與 OpenShift 整合
+
+OpenShift 在標準 Kubernetes 之上增加了企業級安全機制，K10 原生支援：
+
+| OpenShift 特性 | K10 整合方式 |
+|---|---|
+| **SCC（Security Context Constraints）** | `scc.create=true` Helm 參數自動建立 SCC |
+| **Route** | K10 可自動建立 OpenShift Route 暴露儀表板 |
+| **ImageStream** | 備份時自動包含 ImageStream 資源 |
+| **DeploymentConfig**（已棄用） | 支援備份，但建議遷移至 Deployment |
+| **OperatorHub** | K10 提供 Operator 版本，可透過 OLM 安裝 |
+
 ## 架構概覽
 
 ```
