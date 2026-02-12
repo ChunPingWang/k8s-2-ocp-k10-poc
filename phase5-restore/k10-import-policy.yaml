@@ -1,5 +1,9 @@
 # K10 Import Policy for demo-app namespace on OpenShift
 # Apply this on the target (OpenShift) cluster after backup export completes
+#
+# IMPORTANT: You must set receiveString from the source cluster's export policy:
+#   kubectl get policies.config.kio.kasten.io demo-app-backup -n kasten-io \
+#     -o jsonpath='{.spec.actions[1].exportParameters.receiveString}'
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Policy
 metadata:
@@ -14,6 +18,7 @@ spec:
         profile:
           name: minio-export
           namespace: kasten-io
+        receiveString: "<PASTE_RECEIVE_STRING_FROM_SOURCE_CLUSTER>"
         importData:
           enabled: true
   selector:

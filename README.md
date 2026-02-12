@@ -130,8 +130,36 @@ kubectl apply -f phase4-backup/k10-backup-policy.yaml
 ### 階段 5：匯入與還原至 OpenShift（第 3 天）
 
 ```bash
-# 套用匯入策略
+# 在 OpenShift 叢集上建立 MinIO 憑證
+bash phase4-backup/k10-minio-secret.sh
+
+# 建立位置設定檔（endpoint 需改為 OpenShift 可達的 MinIO 位址）
+oc apply -f phase4-backup/k10-location-profile.yaml
+
+# 從來源叢集取得 receiveString
+kubectl --context kind-source-cluster get policies.config.kio.kasten.io \
+  demo-app-backup -n kasten-io \
+  -o jsonpath='{.spec.actions[1].exportParameters.receiveString}'
+
+# 將 receiveString 填入匯入策略後套用
 oc apply -f phase5-restore/k10-import-policy.yaml
+
+# 觸發匯入
+cat <<EOF | oc create -f -
+apiVersion: actions.kio.kasten.io/v1alpha1
+kind: RunAction
+metadata:
+  generateName: run-demo-app-import-
+  namespace: kasten-io
+spec:
+  subject:
+    kind: Policy
+    name: demo-app-import
+    namespace: kasten-io
+EOF
+
+# 建立 RestorePoint 並觸發還原
+# （詳見 poc-k8s-backup-to-openshift-recovery-k10.md）
 
 # 還原後修正
 bash phase5-restore/post-restore-fixup.sh
@@ -159,10 +187,12 @@ bash phase6-validation/validate-restore.sh
 
 ## 已知限制
 
-- **CRC 資源壓力**：K10 在 `kasten-io` 命名空間執行 10+ Pod，CRC 建議分配 ≥14 GB RAM
+- **CRC 資源壓力**：K10 在 `kasten-io` 命名空間執行 16 Pod，CRC 建議分配 ≥14 GB RAM 與 ≥50 GB 磁碟
 - **Kind CSI 快照**：Kind 的 `hostpath.csi.k8s.io` 驅動程式未被 K10 識別為支援的 CSI 驅動程式。通用儲存備份（GSB）自 K10 v6.5.0 起需要付費啟用金鑰（[詳情](https://docs.kasten.io/latest/install/gvs_restricted/)）。PoC 使用 emptyDir 替代 PVC 來展示 K10 資源備份工作流。生產環境請使用 K10 支援的 CSI 驅動程式（AWS EBS、Ceph RBD 等）
+- **CRC 網路隔離**：CRC VM 無法直接存取主機 Docker 容器。解決方案：在 CRC 內部署 MinIO，透過 `oc port-forward` + `mc mirror` 同步匯出資料
+- **匯入需要 receiveString**：K10 匯入策略需要來源叢集匯出策略的 `receiveString`，此字串在首次備份匯出後自動生成
 - **映像檔可用性**：本機建置的映像檔若未推送至共享 Registry，在 CRC 上會出現 `ImagePullBackOff`
-- **OpenShift SCC**：還原的工作負載 Pod 可能仍需手動授予 SCC
+- **OpenShift SCC**：還原的工作負載 Pod 可能仍需手動授予 SCC（`oc adm policy add-scc-to-user anyuid`）
 - **免費版限制**：免費版限制 5 節點，企業功能（多叢集儀表板、RBAC、勒索軟體防護）需付費授權
 
 ## 參考資料
